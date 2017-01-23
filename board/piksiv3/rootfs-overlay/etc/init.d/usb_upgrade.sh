@@ -2,6 +2,7 @@
 
 export FIRMWARE="/media/sda*/PiksiMulti-*.bin"
 export LOGLEVEL="--warn"
+export LOG_INTERVAL=10
 
 _dir_wait () {
     [[ $# -lt 3 ]] && { 
@@ -39,7 +40,19 @@ echo "Performing upgrade..."
 # Killing any processes that could hurt user experience
 /etc/init.d/S90monit stop
 /etc/init.d/S83zmq_adapter_rpmsg_piksi100 stop
+
+# Send output to show the user what we're doing.
+while true; do
+  sleep $LOG_INTERVAL
+  let ELAPSED=$ELAPSED+$LOG_INTERVAL
+  echo "Upgrade in progress: $ELAPSED seconds elapsed"
+done | sbp_log $LOGLEVEL &
+
 upgrade_tool --debug $FIRMWARE | sbp_log $LOGLEVEL
+
+# Stop user output
+kill $!
+
 umount /media/sda1
 sync
 while [ 1 ]; do 
