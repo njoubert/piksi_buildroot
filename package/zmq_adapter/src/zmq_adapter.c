@@ -24,7 +24,8 @@
 typedef enum {
   IO_INVALID,
   IO_FILE,
-  IO_TCP_LISTEN
+  IO_TCP_LISTEN,
+  IO_TCP_CONNECT
 } io_mode_t;
 
 typedef enum {
@@ -61,18 +62,18 @@ static const char *zmq_req_addr = NULL;
 static const char *zmq_rep_addr = NULL;
 static const char *file_path = NULL;
 static int tcp_listen_port = -1;
+static const char *tcp_connect_addr = NULL;
 
-static void debug_printf(const char *msg, ...)
-{
-  if (!debug) {
-    return;
-  }
-
-  va_list ap;
-  va_start(ap, msg);
-  vprintf(msg, ap);
-  va_end(ap);
-}
+static pid_t pub_pid = -1;
+static pid_t sub_pid = -1;
+static pid_t req_pid = -1;
+static pid_t rep_pid = -1;
+static pid_t *pids[] = {
+  &pub_pid,
+  &sub_pid,
+  &req_pid,
+  &rep_pid
+};
 
 static void usage(char *command)
 {
@@ -103,6 +104,7 @@ static void usage(char *command)
   puts("\nIO Modes - select one");
   puts("\t--file <file>");
   puts("\t--tcp-l <port>");
+  puts("\t--tcp-c <addr>");
 
   puts("\nMisc options");
   puts("\t--rep-timeout <ms>");
@@ -115,6 +117,7 @@ static int parse_options(int argc, char *argv[])
   enum {
     OPT_ID_FILE = 1,
     OPT_ID_TCP_LISTEN,
+    OPT_ID_TCP_CONNECT,
     OPT_ID_REP_TIMEOUT,
     OPT_ID_DEBUG,
     OPT_ID_FILTER_IN,
@@ -131,6 +134,7 @@ static int parse_options(int argc, char *argv[])
     {"framer",            required_argument, 0, 'f'},
     {"file",              required_argument, 0, OPT_ID_FILE},
     {"tcp-l",             required_argument, 0, OPT_ID_TCP_LISTEN},
+    {"tcp-c",             required_argument, 0, OPT_ID_TCP_CONNECT},
     {"rep-timeout",       required_argument, 0, OPT_ID_REP_TIMEOUT},
     {"filter-in",         required_argument, 0, OPT_ID_FILTER_IN},
     {"filter-out",        required_argument, 0, OPT_ID_FILTER_OUT},
@@ -154,6 +158,12 @@ static int parse_options(int argc, char *argv[])
       case OPT_ID_TCP_LISTEN: {
         io_mode = IO_TCP_LISTEN;
         tcp_listen_port = strtol(optarg, NULL, 10);
+      }
+      break;
+
+      case OPT_ID_TCP_CONNECT: {
+        io_mode = IO_TCP_CONNECT;
+        tcp_connect_addr = optarg;
       }
       break;
 
@@ -262,19 +272,12 @@ static int parse_options(int argc, char *argv[])
   return 0;
 }
 
-static void sigchld_handler(int signum)
-{
-  int saved_errno = errno;
-  while (waitpid(-1, NULL, WNOHANG) > 0) {
-    ;
-  }
-  errno = saved_errno;
-}
-
 static void terminate_handler(int signum)
 {
-  /* Send this signal to the entire process group */
-  killpg(0, signum);
+  /* If this is the parent, send this signal to the entire process group */
+  if (getpid() == getpgid(0)) {
+    killpg(0, signum);
+  }
 
   /* Exit */
   _exit(EXIT_SUCCESS);
@@ -701,13 +704,48 @@ static void io_loop_reqrep(handle_t *req_handle, handle_t *rep_handle)
   debug_printf("io loop end\n");
 }
 
+static int pid_wait_check(pid_t *pid, pid_t wait_pid)
+{
+  if (*pid > 0) {
+    if (*pid == wait_pid) {
+      *pid = -1;
+      return 0;
+    }
+  }
+
+  return -1;
+}
+
+static void pid_terminate(pid_t *pid)
+{
+  if (*pid > 0) {
+    if (kill(*pid, SIGTERM) != 0) {
+      printf("error terminating pid %d\n", *pid);
+    }
+    *pid = -1;
+  }
+}
+
+void debug_printf(const char *msg, ...)
+{
+  if (!debug) {
+    return;
+  }
+
+  va_list ap;
+  va_start(ap, msg);
+  vprintf(msg, ap);
+  va_end(ap);
+}
+
 void io_loop_start(int fd)
 {
   switch (zsock_mode) {
     case ZSOCK_PUBSUB: {
 
       if (zmq_pub_addr != NULL) {
-        if (fork() == 0) {
+        pid_t pid = fork();
+        if (pid == 0) {
           /* child process */
           zsock_t *pub = zsock_start(ZMQ_PUB);
           if (pub != NULL) {
@@ -725,11 +763,15 @@ void io_loop_start(int fd)
             assert(pub == NULL);
           }
           exit(EXIT_SUCCESS);
+        } else {
+          /* parent process */
+          pub_pid = pid;
         }
       }
 
       if (zmq_sub_addr != NULL) {
-        if (fork() == 0) {
+        pid_t pid = fork();
+        if (pid == 0) {
           /* child process */
           zsock_t *sub = zsock_start(ZMQ_SUB);
           if (sub != NULL) {
@@ -747,6 +789,9 @@ void io_loop_start(int fd)
             assert(sub == NULL);
           }
           exit(EXIT_SUCCESS);
+        } else {
+          /* parent process */
+          sub_pid = pid;
         }
       }
 
@@ -755,7 +800,8 @@ void io_loop_start(int fd)
 
     case ZSOCK_REQ: {
 
-      if (fork() == 0) {
+      pid_t pid = fork();
+      if (pid == 0) {
         /* child process */
         zsock_t *req = zsock_start(ZMQ_REQ);
         if (req != NULL) {
@@ -772,6 +818,9 @@ void io_loop_start(int fd)
           assert(req == NULL);
         }
         exit(EXIT_SUCCESS);
+      } else {
+        /* parent process */
+        req_pid = pid;
       }
 
     }
@@ -779,7 +828,8 @@ void io_loop_start(int fd)
 
     case ZSOCK_REP: {
 
-      if (fork() == 0) {
+      pid_t pid = fork();
+      if (pid == 0) {
         /* child process */
         zsock_t *rep = zsock_start(ZMQ_REP);
         if (rep != NULL) {
@@ -796,6 +846,9 @@ void io_loop_start(int fd)
           assert(rep == NULL);
         }
         exit(EXIT_SUCCESS);
+      } else {
+        /* parent process */
+        rep_pid = pid;
       }
 
     }
@@ -803,6 +856,38 @@ void io_loop_start(int fd)
 
     default:
       break;
+  }
+}
+
+void io_loop_wait(void)
+{
+  while (1) {
+    pid_t pid = waitpid(-1, NULL, 0);
+    if ((pid == -1) && (errno == EINTR)) {
+      /* Retry if interrupted */
+      continue;
+    } else if (pid >= 0) {
+      int i;
+      for (i = 0; i < sizeof(pids) / sizeof(pids[0]); i++) {
+        if (pid_wait_check(&pub_pid, pid) == 0) {
+          /* Return if a child from the list was terminated */
+          return;
+        }
+      }
+      /* Retry if the child was not in the list */
+      continue;
+    } else {
+      /* Return on error */
+      return;
+    }
+  }
+}
+
+void io_loop_terminate(void)
+{
+  int i;
+  for (i = 0; i < sizeof(pids) / sizeof(pids[0]); i++) {
+    pid_terminate(pids[i]);
   }
 }
 
@@ -819,16 +904,6 @@ int main(int argc, char *argv[])
   zsys_handler_set(NULL);
 
   signal(SIGPIPE, SIG_IGN); /* Allow write to return an error */
-
-  /* Set up SIGCHLD handler */
-  struct sigaction sigchld_sa;
-  sigchld_sa.sa_handler = sigchld_handler;
-  sigemptyset(&sigchld_sa.sa_mask);
-  sigchld_sa.sa_flags = SA_NOCLDSTOP;
-  if (sigaction(SIGCHLD, &sigchld_sa, NULL) != 0) {
-    printf("error setting up sigchld handler\n");
-    exit(EXIT_FAILURE);
-  }
 
   /* Set up handler for signals which should terminate the program */
   struct sigaction terminate_sa;
@@ -854,6 +929,12 @@ int main(int argc, char *argv[])
     case IO_TCP_LISTEN: {
       extern int tcp_listen_loop(int port);
       ret = tcp_listen_loop(tcp_listen_port);
+    }
+    break;
+
+    case IO_TCP_CONNECT: {
+      extern int tcp_connect_loop(const char *addr);
+      ret = tcp_connect_loop(tcp_connect_addr);
     }
     break;
 

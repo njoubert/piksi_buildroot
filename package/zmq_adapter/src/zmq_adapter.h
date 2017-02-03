@@ -18,6 +18,9 @@
 
 #include <czmq.h>
 
+void debug_printf(const char *msg, ...);
 void io_loop_start(int fd);
+void io_loop_wait(void);
+void io_loop_terminate(void);
 
 #endif /* SWIFTNAV_ZMQ_ADAPTER_H */
