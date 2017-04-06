@@ -13,4 +13,5 @@ source "$BR2_EXTERNAL/package/sbp_fileio_daemon/Config.in"
 source "$BR2_EXTERNAL/package/sbp_rtcm3_bridge/Config.in"
 source "$BR2_EXTERNAL/package/rotating_zmq_logger/Config.in"
 source "$BR2_EXTERNAL/package/libpiksi/Config.in"
+source "$BR2_EXTERNAL/package/sbp_protocol/Config.in"
 
